@@ -1,4 +1,5 @@
 var d3 = require('d3')
+  , chroma = require('chroma-js')
   , mousetrap = require('mousetrap')
   , debounce = require('debounce')
   , resize = require('./resize')
@@ -13,10 +14,10 @@ var nodes = colony.nodes
 
 var width = 600
   , height = 400
+  , margin = { horizontal: 100, vertical: 50 }
   , link
   , node
   , text
-  , textTarget = false
 
 var colors = {
       links: 'FAFAFA'
@@ -34,6 +35,14 @@ var colors = {
 
 var readme = document.getElementById('readme-contents').innerHTML
 
+// hack to help see what modules are only used by web workers
+links = links.filter(l => (nodes[l.target].id !== 'worker.js'))
+links.push({
+  source: nodes.findIndex(n => n.id === 'map.js'),
+  target: nodes.findIndex(n => n.id === 'worker.js'),
+  hidden: true
+})
+
 links.forEach(function(link) {
     var source = nodes[link.source]
       , target = nodes[link.target]
@@ -45,59 +54,125 @@ links.forEach(function(link) {
     target.parents.push(link.source)
 })
 
-var groups = nodes.reduce(function(groups, file) {
-    var group = file.mgroup || 'none'
-      , index = groups.indexOf(group)
+var groupDepth = 2
+function groupByFocus() {
+  // first get each node's minDepth from root nodes
+  nodes.filter(n => n.root).forEach(function (f, i, arr) { mark(f, f.id, 0) })
+  nodes.forEach(n => {
+    n.minDepth = d3.min(d3.values(n._sources))
+    delete n._sources
+  })
 
-    if (index === -1) {
-        index = groups.length
-        groups.push(group)
+  // now, nodes that are at groupDepth as the grouping roots
+  var colorScale = chroma.scale('Spectral')
+  var groupColors = {}
+  nodes.filter(n => (n.minDepth === groupDepth)).forEach(function (n, i, arr) {
+    mark(n, n.id, 0)
+    groupColors[n.id] = colorScale(i / arr.length)
+    console.log('%c' + n.id, 'color: ' + groupColors[n.id].hex())
+  })
+  nodes.filter(n => (n.minDepth < groupDepth)).forEach(function (n) {
+    n._sources = { root: 0 }
+    groupColors.root = colorScale(1)
+  })
+
+  var roots = nodes.filter(n => (n.minDepth === groupDepth || n.minDepth === 0))
+  for (var i = 0; i < roots.length; i++) {
+    for (var j = i + 1; j < roots.length; j++) {
+      links.push({ source: roots[i], target: roots[j], hidden: true })
     }
+  }
 
+  var groups = nodes.reduce(function (groups, file) {
+    var group = Object.keys(file._sources).sort().join('-')
+    var index = groups.indexOf(group)
+    if (index === -1) {
+      index = groups.length
+      groups.push(group)
+    }
     file.group = index
-
     return groups
-}, [])
+  }, [])
 
-groups = groups.map(function(name, n) {
-    var color = d3.hsl(n / groups.length * 300, 0.7, 0.725)
+  ;[].concat(groups).sort().forEach(g => {
+    if (groupColors[g]) { return }
+    var colors = g.split('-').map(id => groupColors[id])
+    var color = colors[0]
+    for (var i = 1; i < colors.length; i++) {
+      color = chroma.mix(color, colors[i], 1 - i / colors.length, 'lab')
+    }
+    groupColors[g] = color
+  })
 
-    return {
-          name: name
-        , color: color.toString()
-    };
-})
+  return groups.map(g => ({name: g, color: groupColors[g]}))
+
+  function mark (node, source, depth, stack) {
+    if (!stack) { stack = [] }
+    if (stack.indexOf(node.id) >= 0) { return }
+    stack = stack.concat([node.id])
+    if (!node._sources) { node._sources = {} }
+    var sources = node._sources
+    // otherwise, mark the depth and recurse
+    sources[source] = Math.max(depth, sources[source] || 0)
+    if (node.children) {
+      depth += 1
+      node.children.map(i => nodes[i]).forEach(child => mark(child, source, depth, stack))
+    }
+  }
+}
+
+var groups = groupByFocus()
+
+function resetForce () {
+    return this.charge(function (d) { return d.fixed ? 0 : -10 * d.id.length * colony.scale })
+    .linkDistance(function (d) {
+      var mult
+      if (d.source.minDepth === groupDepth && d.target.minDepth === groupDepth) {
+        mult = 30
+      } else if (d.target.group !== d.source.group) {
+        mult = 10
+      } else {
+        mult = 5
+      }
+      return mult * (d.target.id.length + d.source.id.length) * colony.scale
+    })
+    .linkStrength(function (d) {
+      if (d.source.minDepth < groupDepth || d.target.minDepth < groupDepth) {
+        return 0
+      }
+      return d.source.group === d.target.group ? 1 : 0.125
+    })
+}
 
 var force = d3.layout.force()
+resetForce.call(force)
     .size([width, height])
-    .charge(-50 * colony.scale)
-    .linkDistance(20 * colony.scale)
     .on('tick', function() {
-        link.attr('x1', function(d) { return d.source.x; })
-            .attr('y1', function(d) { return d.source.y; })
-            .attr('x2', function(d) { return d.target.x; })
-            .attr('y2', function(d) { return d.target.y; })
+        link.attr('x1', function(d) { return bounded(d.source.x, width); })
+            .attr('y1', function(d) { return bounded(d.source.y, height); })
+            .attr('x2', function(d) { return bounded(d.target.x, width); })
+            .attr('y2', function(d) { return bounded(d.target.y, height); })
 
-        node.attr('cx', function(d) { return d.x; })
-            .attr('cy', function(d) { return d.y; })
+        node.attr('transform', function (d) {
+          return 'translate(' + bounded(d.x, width) + ',' + bounded(d.y, height) + ')'
+        })
 
-        if (textTarget) {
-            text.attr('transform'
-                    , 'translate(' + textTarget.x + ',' + textTarget.y + ')')
-        }
+        function bounded (t, max) { return Math.min(Math.max(t, 0), max) }
     })
 
 var vis = d3.select(root)
     .append('svg')
-    .attr('width', width)
-    .attr('height', height)
+    .attr('width', width + margin.vertical)
+    .attr('height', height + margin.horizontal)
+    .append('g')
+    .attr('transform', 'translate(' + margin.horizontal / 2 + ',' + margin.vertical / 2 + ')')
 
 force.nodes(nodes)
      .links(links)
      .start()
 
 link = vis.selectAll('line.link').data(links)
-node = vis.selectAll('circle.node')
+node = vis.selectAll('g.node')
     .data(nodes, function(d) { return d.filename })
 
 link.enter()
@@ -109,61 +184,41 @@ link.enter()
     .attr('y2', function(d) { return d.target.y; })
     .style('stroke', colors.links)
     .style('opacity', function(d) {
-        return d.target.module ? 0.2 : 0.3
+        return d.hidden ? 0 : 0.3
     })
 
-node.enter()
-    .append('circle')
+
+var nodeEnter = node.enter()
+    .append('g')
+    .attr('transform', function (d) { return 'translate(' + d.x + ',' + d.y + ')' })
     .attr('class', 'node')
-    .attr('cx', function(d) { return d.x })
-    .attr('cy', function(d) { return d.y })
-    .attr('r', function(d) {
-        return scale * (d.root ? 8 : d.module && !d.native ? 5 : 3)
-    })
-    .style('fill', colors.nodes.method)
     .call(force.drag)
     .on('mouseover', function(d) {
-        textTarget = d
-
-        text.attr('transform', 'translate(' + d.x + ',' + d.y + ')')
-            .text(d.id)
-            .style('display', null)
-
-        d3.select(this)
+        console.log(d.id, groups[d.group], d)
+        d3.select(this).select('circle')
           .style('fill', colors.nodes.hover)
-
-        d3.selectAll(childNodes(d))
+        d3.selectAll(childNodes(d)).select('circle')
             .style('fill', colors.nodes.hover)
             .style('stroke', colors.nodes.method)
             .style('stroke-width', 2)
-
-        d3.selectAll(parentNodes(d))
+        d3.selectAll(parentNodes(d)).select('circle')
             .style('fill', colors.nodes.dep)
             .style('stroke', colors.nodes.method)
             .style('stroke-width', 2)
     })
     .on('mouseout', function(d) {
-        textTarget = false
-
-        text.style('display', 'none')
-
-        d3.select(this)
+        d3.select(this).select('circle')
           .style('fill', colors.nodes.method)
-
-        d3.selectAll(childNodes(d))
+        d3.selectAll(childNodes(d)).select('circle')
             .style('fill', colors.nodes.method)
             .style('stroke', null)
-
-        d3.selectAll(parentNodes(d))
+        d3.selectAll(parentNodes(d)).select('circle')
             .style('fill', colors.nodes.method)
             .style('stroke', null)
     })
     .on('click', function(d) {
         if (focus === d) {
-            force.charge(-50 * colony.scale)
-                 .linkDistance(20 * colony.scale)
-                 .linkStrength(1)
-                 .start()
+            resetForce.call(force).start()
 
             node.style('opacity', 1)
             link.style('opacity', function(d) {
@@ -172,9 +227,12 @@ node.enter()
 
             focus = false
 
-            d3.select('#readme-contents')
-              .html(readme)
+            d3.select(root)
               .classed('showing-code', false)
+            if (readme) {
+              d3.select('#readme-contents')
+                .html(readme)
+            }
 
             return
         }
@@ -186,6 +244,7 @@ node.enter()
 
             d3.select('#readme-contents')
               .html(res.responseText)
+            d3.select('#readme')
               .classed('showing-code', true)
 
             document.getElementById('readme')
@@ -210,31 +269,28 @@ node.enter()
         })
     })
 
-text = vis.selectAll('.nodetext')
-    .data([
-          [-1.5,  1.5,  1] // "Shadows"
-        , [ 1.5,  1.5,  1]
-        , [-1.5, -1.5,  1]
-        , [ 1.5, -1.5,  1]
-        , [ 0.0,  0.0,  0] // Actual Text
-    ])
-  .enter()
-    .insert('text', ':last-child')
+nodeEnter.append('circle')
+    .attr('class', 'node')
+    .attr('r', function(d) {
+        return scale * ((d.minDepth === groupDepth || d.minDepth === 0) ? 12 : 5)
+    })
+    .style('fill', colors.nodes.method)
+
+nodeEnter.append('text')
     .attr('class', 'nodetext')
-    .classed('shadow', function(d) { return d[2] })
-    .attr('dy', function(d) { return d[0] - 10 })
-    .attr('dx', function(d) { return d[1] })
     .attr('text-anchor', 'middle')
+    .attr('dy', -10)
+    .text(function (d) { return d.id })
 
 function refresh(e) {
-    width = Math.max(window.innerWidth * 0.5, 500)
-    height = window.innerHeight
+    width = Math.max(window.innerWidth, 500) - margin.horizontal
+    height = window.innerHeight - margin.vertical
 
     force.size([width, height])
          .resume()
 
-    vis.attr('width', window.innerWidth)
-       .attr('height', height)
+     d3.select(root).select('svg')
+       .attr('width', width + margin.horizontal).attr('height', height + margin.vertical)
 };
 
 function childNodes(d) {

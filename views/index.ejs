@@ -13,6 +13,16 @@
         <link href='http://fonts.googleapis.com/css?family=Source+Sans+Pro:300,600,300italic|Source+Code+Pro:400' rel='stylesheet' type='text/css'>
     </head>
     <body>
+        <script>
+          function toggle (sel) {
+            var node = document.querySelector(sel)
+            if (node.style.display === 'none') {
+              node.style.display = ''
+            } else {
+              node.style.display = 'none'
+            }
+          }
+        </script>
         <div id="wrapper">
             <div id="main" role="main">
                 <div id="colony"></div>
