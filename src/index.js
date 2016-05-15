@@ -30,10 +30,11 @@ var colors = {
         }
         , hover: 'FAFAFA'
         , dep: '252929'
+        , root: d => chroma(groups[d.group].color).darken(2.5)
     }
 }
 
-var readme = document.getElementById('readme-contents').innerHTML
+var readme = document.getElementById('readme-contents').innerHTML.trim()
 
 // hack to help see what modules are only used by web workers
 links = links.filter(l => (nodes[l.target].id !== 'worker.js'))
@@ -52,6 +53,11 @@ links.forEach(function(link) {
 
     target.parents = target.parents || []
     target.parents.push(link.source)
+})
+
+nodes.forEach(n => {
+  n.px = n.x = width * Math.random()
+  n.py = n.y = height * Math.random()
 })
 
 var groupDepth = 2
@@ -104,7 +110,7 @@ function groupByFocus() {
     groupColors[g] = color
   })
 
-  return groups.map(g => ({name: g, color: groupColors[g]}))
+  return groups.map(g => ({ name: g, color: groupColors[g].hex() }))
 
   function mark (node, source, depth, stack) {
     if (!stack) { stack = [] }
@@ -145,8 +151,9 @@ function resetForce () {
 }
 
 var force = d3.layout.force()
+  .size([width, height])
+
 resetForce.call(force)
-    .size([width, height])
     .on('tick', function() {
         link.attr('x1', function(d) { return bounded(d.source.x, width); })
             .attr('y1', function(d) { return bounded(d.source.y, height); })
@@ -205,6 +212,10 @@ var nodeEnter = node.enter()
             .style('fill', colors.nodes.dep)
             .style('stroke', colors.nodes.method)
             .style('stroke-width', 2)
+        d3.selectAll(rootNodes(d)).select('circle')
+            .style('fill', colors.nodes.root)
+            .style('stroke', colors.nodes.method)
+            .style('stroke-width', 2)
     })
     .on('mouseout', function(d) {
         d3.select(this).select('circle')
@@ -215,59 +226,11 @@ var nodeEnter = node.enter()
         d3.selectAll(parentNodes(d)).select('circle')
             .style('fill', colors.nodes.method)
             .style('stroke', null)
+        d3.selectAll(rootNodes(d)).select('circle')
+            .style('fill', colors.nodes.method)
+            .style('stroke', null)
     })
-    .on('click', function(d) {
-        if (focus === d) {
-            resetForce.call(force).start()
-
-            node.style('opacity', 1)
-            link.style('opacity', function(d) {
-                return d.target.module ? 0.2 : 0.3
-            })
-
-            focus = false
-
-            d3.select(root)
-              .classed('showing-code', false)
-            if (readme) {
-              d3.select('#readme-contents')
-                .html(readme)
-            }
-
-            return
-        }
-
-        focus = d
-
-        d3.xhr('./files/' + d.filename + '.html', function(res) {
-            if (!res) return
-
-            d3.select('#readme-contents')
-              .html(res.responseText)
-            d3.select('#readme')
-              .classed('showing-code', true)
-
-            document.getElementById('readme')
-                    .scrollTop = 0
-        })
-
-        node.style('opacity', function(o) {
-            o.active = connected(d, o)
-            return o.active ? 1 : 0.2
-        })
-
-        force.charge(function(o) {
-            return (o.active ? -100 : -5) * colony.scale
-        }).linkDistance(function(l) {
-            return (l.source.active && l.target.active ? 100 : 20) * colony.scale
-        }).linkStrength(function(l) {
-            return (l.source === d || l.target === d ? 1 : 0) * colony.scale
-        }).start()
-
-        link.style('opacity', function(l, i) {
-            return l.source.active && l.target.active ? 0.2 : 0.02
-        })
-    })
+    .on('click', focusNode)
 
 nodeEnter.append('circle')
     .attr('class', 'node')
@@ -282,37 +245,93 @@ nodeEnter.append('text')
     .attr('dy', -10)
     .text(function (d) { return d.id })
 
+
+resize(debounce(refresh, 500))
+focusNode(false)
+
+mousetrap.bind(['~', '`'], function() {
+    var readme = d3.select('#readme')
+    readme.classed('enlarged', !readme.classed('enlarged'))
+})
+
 function refresh(e) {
-    width = Math.max(window.innerWidth, 500) - margin.horizontal
+    width = Math.max(focus ? window.innerWidth / 2 : window.innerWidth, 300) - margin.horizontal
     height = window.innerHeight - margin.vertical
 
-    force.size([width, height])
-         .resume()
+    force.size([width, height]).resume()
 
-     d3.select(root).select('svg')
-       .attr('width', width + margin.horizontal).attr('height', height + margin.vertical)
+    d3.select(root).select('svg')
+      .attr('width', width + margin.horizontal).attr('height', height + margin.vertical)
 };
+
+function focusNode (d) {
+  if (!d || focus === d) {
+      resetForce.call(force).start()
+      node.style('opacity', 1).style('pointer-events', 'all')
+        .select('text').style('opacity', 1)
+      link.style('opacity', function(d) { return d.target.module ? 0.2 : 0.3 }) 
+      focus = false
+
+      d3.select('#readme').classed('showing-code', !!readme)
+      if (readme) {
+        d3.select('#readme-contents').html(readme)
+      }
+  } else {
+    focus = d
+
+    d3.xhr('./files/' + d.filename + '.html', function(res) {
+        if (!res) return
+        d3.select('#readme-contents').html(res.responseText)
+        d3.select('#readme').classed('showing-code', true)
+        document.getElementById('readme').scrollTop = 0
+    })
+
+    node.style('opacity', function(o) {
+        o.active = connected(d, o)
+        return o.active ? 1 : 0.2
+    })
+    .style('pointer-events', function (o) {
+        return o.active ? 'all' : 'none'
+    })
+    .select('text').style('opacity', o => o.active ? 1 : 0)
+
+    force.charge(function(o) {
+        return (o.active ? -100 : -5) * colony.scale
+    }).linkDistance(function(l) {
+        return (l.source.active || l.target.active ? 100 : 20) * colony.scale
+    }).linkStrength(function(l) {
+        return (l.source === d || l.target === d ? 1 : 0) * colony.scale
+    }).start()
+
+    link.style('opacity', function(l, i) {
+        return l.source.active && l.target.active ? 0.2 : 0.02
+    })
+  }
+
+  refresh()
+}
 
 function childNodes(d) {
     if (!d.children) return []
-
     return d.children
-        .map(function(child) {
-            return node[0][child]
-        }).filter(function(child) {
-            return child
-        })
+      .map(function(child) { return node[0][child] })
+      .filter(Boolean)
 };
 
 function parentNodes(d) {
     if (!d.parents) return []
-
     return d.parents
-        .map(function(parent) {
-            return node[0][parent]
-        }).filter(function(parent) {
-            return parent
-        })
+      .map(function(parent) { return node[0][parent] })
+      .filter(Boolean)
+};
+
+function rootNodes(d) {
+    if (!d.group) return []
+    if (groups[d.group].name === 'root') { return [] }
+
+    return groups[d.group].name.split('-')
+      .map(rootId => node[0][nodes.findIndex(n => n.id === rootId)])
+      .filter(Boolean)
 };
 
 function connected(d, o) {
@@ -325,16 +344,6 @@ function connected(d, o) {
 
 function restartForce() {
     var theta = force.theta()
-
-    force.start()
-         .theta(theta)
+    force.start().theta(theta)
 };
 
-resize(debounce(refresh, 500))
-refresh()
-
-mousetrap.bind(['~', '`'], function() {
-    var readme = d3.select('#readme')
-
-    readme.classed('enlarged', !readme.classed('enlarged'))
-})
